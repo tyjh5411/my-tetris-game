@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>俄羅斯方塊 - 全球排名版</title>
+    <style>
+        body { background: #1a1a1d; color: white; font-family: "Microsoft JhengHei", sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; }
+        #game-wrapper { display: flex; gap: 20px; background: #2b2b2b; padding: 20px; border-radius: 15px; box-shadow: 0 20px 50px rgba(0,0,0,0.7); border: 1px solid #444; }
+        canvas { border: 3px solid #555; background-color: #000; }
+        .side-bar { width: 180px; display: flex; flex-direction: column; gap: 15px; }
+        .next-container { background: #333; padding: 10px; border-radius: 8px; text-align: center; border: 1px solid #444; }
+        #next-canvas { background: #000; margin-top: 5px; border: 1px solid #222; }
+        .rank-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #333; }
+        .rank-table th, .rank-table td { border: 1px solid #444; padding: 6px; text-align: center; }
+        #login-screen, #start-prompt { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 100; }
+        #start-prompt { background: rgba(0,0,0,0.8); display: none; }
+        input { padding: 12px; font-size: 18px; border-radius: 8px; border: none; margin-bottom: 15px; width: 250px; text-align: center; color: #000; }
+        button { padding: 12px 30px; font-size: 18px; background: #00d4ff; color: #000; border: none; cursor: pointer; border-radius: 8px; font-weight: bold; }
+        .hint { color: #00d4ff; font-size: 20px; font-weight: bold; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h1 style="color: #00d4ff; letter-spacing: 5px;">TETRIS ONLINE</h1>
+        <input type="text" id="username" placeholder="請輸入玩家名稱" maxlength="10">
+        <button id="login-btn">登錄並獲取排名</button>
+    </div>
+
+    <div id="start-prompt">
+        <h2 style="color: #f1c40f;">歡迎, <span id="welcome-user"></span>!</h2>
+        <p class="hint">按 ENTER 鍵開始遊戲</p>
+    </div>
+
+    <div id="game-wrapper">
+        <canvas id="tetris" width="240" height="400"></canvas>
+        <div class="side-bar">
+            <div class="next-container">
+                <div style="font-size: 14px; color: #00d4ff; margin-bottom: 5px;">下一個</div>
+                <canvas id="next-canvas" width="80" height="80"></canvas>
+            </div>
+            <div style="text-align: center;">個人得分：<b id="score" style="color: #f1c40f; font-size: 20px;">0</b></div>
+            <hr style="border: 0.5px solid #444; width: 100%;">
+            <div style="text-align: center; font-size: 14px; margin-bottom: 5px;">🏆 全服前 5 名</div>
+            <table class="rank-table">
+                <thead><tr><th>名次</th><th>玩家</th><th>分數</th></tr></thead>
+                <tbody id="rank-list"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('tetris');
+        const context = canvas.getContext('2d');
+        context.scale(20, 20);
+
+        const nextCanvas = document.getElementById('next-canvas');
+        const nextContext = nextCanvas.getContext('2d');
+        nextContext.scale(20, 20);
+
+        let playerName = "";
+        let score = 0;
+        let gameRunning = false;
+        let waitingForStart = false;
+        const colors = [null, '#00f0f0', '#f0a000', '#0000f0', '#f0f000', '#f00000', '#00f000', '#a000f0'];
+
+        // --- 與後端伺服器通訊 ---
+        async function refreshLeaderboard() {
+            try {
+                const response = await fetch('/api/scores');
+                const data = await response.json();
+                document.getElementById('rank-list').innerHTML = data.map((item, i) => 
+                    `<tr><td>${i+1}</td><td>${item.name}</td><td>${item.score}</td></tr>`
+                ).join('');
+            } catch (err) {
+                console.error("無法從伺服器獲取數據", err);
+            }
+        }
+
+        async function saveToServer() {
+            try {
+                await fetch('/api/scores', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: playerName, score: score })
+                });
+                refreshLeaderboard();
+            } catch (err) {
+                console.error("得分儲存失敗", err);
+            }
+        }
+
+        // --- 流程控制 ---
+        document.getElementById('login-btn').addEventListener('click', () => {
+            const name = document.getElementById('username').value.trim();
+            if (!name) return alert("請輸入名稱！");
+            playerName = name;
+            document.getElementById('welcome-user').innerText = name;
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('start-prompt').style.display = 'flex';
+            waitingForStart = true;
+            refreshLeaderboard(); // 登錄時即獲取最新雲端排名
+        });
+
+        // --- 俄羅斯方塊邏輯 ---
+        function createPiece(type) {
+            if (type === 'I') return [[0,1,0,0],[0,1,0,0],[0,1,0,0],[0,1,0,0]];
+            if (type === 'L') return [[0,2,0],[0,2,0],[0,2,2]];
+            if (type === 'J') return [[0,3,0],[0,3,0],[3,3,0]];
+            if (type === 'O') return [[4,4],[4,4]];
+            if (type === 'Z') return [[5,5,0],[0,5,5],[0,0,0]];
+            if (type === 'S') return [[0,6,6],[6,6,0],[0,0,0]];
+            if (type === 'T') return [[0,7,0],[7,7,7],[0,0,0]];
+        }
+
+        const arena = Array.from({length: 20}, () => Array(12).fill(0));
+        const player = { pos: {x: 0, y: 0}, matrix: null, next: null };
+
+        function drawMatrix(matrix, offset, ctx) {
+            matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value !== 0) {
+                        ctx.fillStyle = colors[value];
+                        ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+                    }
+                });
+            });
+        }
+
+        function draw() {
+            context.fillStyle = '#000';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            drawMatrix(arena, {x: 0, y: 0}, context);
+            drawMatrix(player.matrix, player.pos, context);
+            
+            nextContext.fillStyle = '#000';
+            nextContext.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+            drawMatrix(player.next, {x: 0, y: 0}, nextContext);
+        }
+
+        function collide(arena, player) {
+            const [m, o] = [player.matrix, player.pos];
+            for (let y = 0; y < m.length; ++y) {
+                for (let x = 0; x < m[y].length; ++x) {
+                    if (m[y][x] !== 0 && (arena[y + o.y] && arena[y + o.y][x + o.x]) !== 0) return true;
+                }
+            }
+            return false;
+        }
+
+        function merge(arena, player) {
+            player.matrix.forEach((row, y) => {
+                row.forEach((value, x) => {
+                    if (value !== 0) arena[y + player.pos.y][x + player.pos.x] = value;
+                });
+            });
+        }
+
+        function arenaSweep() {
+            outer: for (let y = arena.length - 1; y > 0; --y) {
+                for (let x = 0; x < arena[y].length; ++x) {
+                    if (arena[y][x] === 0) continue outer;
+                }
+                const row = arena.splice(y, 1)[0].fill(0);
+                arena.unshift(row);
+                ++y;
+                score += 10;
+            }
+            document.getElementById('score').innerText = score;
+        }
+
+        function playerReset() {
+            const pieces = 'ILJOTSZ';
+            if (player.next === null) player.next = createPiece(pieces[pieces.length * Math.random() | 0]);
+            player.matrix = player.next;
+            player.next = createPiece(pieces[pieces.length * Math.random() | 0]);
+            player.pos.y = 0;
+            player.pos.x = (arena[0].length / 2 | 0) - (player.matrix[0].length / 2 | 0);
+            
+            if (collide(arena, player)) {
+                saveToServer(); // 結束時同步到伺服器
+                alert("遊戲結束！分數已同步至雲端：" + score);
+                arena.forEach(row => row.fill(0));
+                score = 0;
+                document.getElementById('score').innerText = score;
+                gameRunning = false;
+                document.getElementById('start-prompt').style.display = 'flex';
+                waitingForStart = true;
+            }
+        }
+
+        function rotate(matrix, dir) {
+            for (let y = 0; y < matrix.length; ++y) {
+                for (let x = 0; x < y; ++x) {
+                    [matrix[x][y], matrix[y][x]] = [matrix[y][x], matrix[x][y]];
+                }
+            }
+            if (dir > 0) matrix.forEach(row => row.reverse()); else matrix.reverse();
+        }
+
+        function playerRotate(dir) {
+            const pos = player.pos.x;
+            let offset = 1;
+            rotate(player.matrix, dir);
+            while (collide(arena, player)) {
+                player.pos.x += offset;
+                offset = -(offset + (offset > 0 ? 1 : -1));
+                if (offset > player.matrix[0].length) {
+                    rotate(player.matrix, -dir);
+                    player.pos.x = pos;
+                    return;
+                }
+            }
+        }
+
+        function playerDrop() {
+            player.pos.y++;
+            if (collide(arena, player)) {
+                player.pos.y--;
+                merge(arena, player);
+                playerReset();
+                arenaSweep();
+            }
+            dropCounter = 0;
+        }
+
+        let dropCounter = 0;
+        let lastTime = 0;
+        function update(time = 0) {
+            if (!gameRunning) return;
+            const deltaTime = time - lastTime;
+            lastTime = time;
+            dropCounter += deltaTime;
+            if (dropCounter > 800) playerDrop();
+            draw();
+            requestAnimationFrame(update);
+        }
+
+        document.addEventListener('keydown', event => {
+            if (waitingForStart && event.keyCode === 13) { 
+                waitingForStart = false;
+                gameRunning = true;
+                document.getElementById('start-prompt').style.display = 'none';
+                playerReset();
+                update();
+                return;
+            }
+            if (!gameRunning) return;
+            if (event.keyCode === 37) { player.pos.x--; if(collide(arena, player)) player.pos.x++; } 
+            else if (event.keyCode === 39) { player.pos.x++; if(collide(arena, player)) player.pos.x--; } 
+            else if (event.keyCode === 40) { playerDrop(); } 
+            else if (event.keyCode === 38 || event.keyCode === 32) { playerRotate(1); }
+        });
+
+        // 啟動時先嘗試載入一次排行榜
+        refreshLeaderboard();
+    </script>
+</body>
+</html>
